@@ -72,7 +72,9 @@ router.get('/join/:accessCode', verifyToken, async (req, res) => {
         }
         res.status(200).json({
             quizId: quiz._id,
-            title: quiz.title
+            title: quiz.title,
+            creator: quiz.creator.toString(),
+            accessCode: quiz.accessCode
         });
 
     } catch (error) {
