@@ -6,6 +6,7 @@ const {
     emitQuestion,
     clearSessionForNewGame,
     getLeaderboard,
+    loadQuizState,
 } = require("./gameSession");
 
 function registerGameHandlers(io) {
@@ -13,7 +14,6 @@ function registerGameHandlers(io) {
         console.log("User connected:", socket.id, socket.displayName);
 
         socket.on("join-room", async ({ quizId }) => {
-            // quizId here is actually the accessCode from the frontend
             const accessCode = quizId;
             if (!accessCode) return;
 
@@ -24,6 +24,13 @@ function registerGameHandlers(io) {
             await redis.sadd(`players:${accessCode}`, name);
             const players = await redis.smembers(`players:${accessCode}`);
             io.to(accessCode).emit("update-players", players);
+
+            // Sync current game state for the re-joining/joining user
+            const currentState = await loadQuizState(accessCode, socket.userId);
+            if (currentState) {
+                socket.emit("sync-game-state", currentState);
+            }
+           
             console.log(`${name} joined room ${accessCode}`);
         });
 
@@ -53,6 +60,7 @@ function registerGameHandlers(io) {
             if (nextIndex < quiz.questions.length) {
                 await emitQuestion(io, accessCode, nextIndex);
             } else {
+                await redis.set(`session:${accessCode}:status`, "GAMEOVER");
                 const leaderboard = await getLeaderboard(accessCode);
                 io.to(accessCode).emit("game-over", { leaderboard });
             }
@@ -105,6 +113,9 @@ function registerGameHandlers(io) {
 
         socket.on("request-leaderboard", async ({ quizId }) => {
             const accessCode = quizId;
+            const quiz = await loadQuizByAccessCode(accessCode);
+            if (!quiz || !(await isHost(socket, quiz))) return;
+
             // Set status to leaderboard so no more answers are accepted
             await redis.set(`session:${accessCode}:status`, "leaderboard");
             const leaderboard = await getLeaderboard(accessCode);
@@ -121,7 +132,13 @@ function registerGameHandlers(io) {
             const players = await redis.smembers(
                 `players:${socket.accessCode}`
             );
-            io.to(socket.accessCode).emit("update-players", players);
+            
+            if (players.length === 0) {
+                console.log(`Cleaning up stale session for ${socket.accessCode}`);
+                await clearSessionForNewGame(socket.accessCode);
+            } else {
+                io.to(socket.accessCode).emit("update-players", players);
+            }
         });
     });
 }

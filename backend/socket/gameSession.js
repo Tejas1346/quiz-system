@@ -92,6 +92,81 @@ async function clearSessionForNewGame(accessCode) {
     await redis.del(...deleteKeys);
 }
 
+async function loadQuizState(accessCode, userId) {
+    try {
+        const keys = getSessionKeys(accessCode);
+        const status = (await redis.get(keys.status)) || "LOBBY";
+        const players = await redis.smembers(keys.players);
+        const quiz = await loadQuizByAccessCode(accessCode);
+
+        let state = {
+            gameState: status.toUpperCase(),
+            players,
+        };
+
+        // If the status is GAMEOVER or leaderboard but there are no players, or it's just very old, consider it LOBBY
+        // For now, let's treat GAMEOVER as stale if someone is just joining a "new" room session.
+        // Actually, the best indicator is if the host is there and if it's been a long time.
+        
+        if (status === "question") {
+            const questionIndexRaw = await redis.get(keys.questionIndex);
+            if (questionIndexRaw === null) return { gameState: "LOBBY", players };
+            
+            const questionIndex = parseInt(questionIndexRaw);
+            const question = quiz?.questions[questionIndex];
+            if (!question) return { gameState: "LOBBY", players };
+
+            const startedAtRaw = await redis.get(`session:${accessCode}:${questionIndex}:startedAt`);
+            const startedAt = parseInt(startedAtRaw);
+            
+            // If startedAt is more than 2 hours ago, it's definitely stale
+            if (!startedAt || (Date.now() - startedAt) > 2 * 60 * 60 * 1000) {
+                return { gameState: "LOBBY", players };
+            }
+
+            const timeTaken = (Date.now() - startedAt) / 1000;
+            const timeRemaining = Math.max(
+                0,
+                Math.floor(question.duration - timeTaken)
+            );
+            const answeredCount =
+                parseInt(await redis.get(`answered_count:${accessCode}`)) || 0;
+            const hasAnswered = await redis.sismember(
+                `answered:${accessCode}:${questionIndex}`,
+                userId
+            );
+
+            state = {
+                ...state,
+                currentQuestion: {
+                    questionIndex,
+                    questionText: question.questionText,
+                    questionDuration: question.duration,
+                    options: question.options,
+                },
+                questionNumber: questionIndex + 1,
+                timer: timeRemaining,
+                answeredCount,
+                hasAnswered: !!hasAnswered,
+            };
+        } else if (status === "leaderboard") {
+            const leaderboard = await getLeaderboard(accessCode);
+            state = {
+                ...state,
+                leaderboard,
+            };
+        } else if (status === "GAMEOVER") {
+            // GAMEOVER is almost always stale when joining a "new" room
+            return { gameState: "LOBBY", players };
+        }
+
+        return state;
+    } catch (error) {
+        console.log("error while loading quiz state", error);
+        return { gameState: "LOBBY", players: [] };
+    }
+}
+
 module.exports = {
     loadQuizByAccessCode,
     isHost,
@@ -99,4 +174,5 @@ module.exports = {
     emitQuestion,
     clearSessionForNewGame,
     getLeaderboard,
+    loadQuizState,
 };
