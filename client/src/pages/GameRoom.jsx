@@ -77,6 +77,21 @@ export default function GameRoom() {
       setPlayers(playerList);
     });
 
+    socket.on('sync-game-state', (state) => {
+      if (state.gameState) setGameState(state.gameState);
+      if (state.players) setPlayers(state.players);
+      if (state.currentQuestion) {
+        setCurrentQuestion(state.currentQuestion);
+        setQuestionNumber(state.questionNumber);
+        setTimer(state.timer);
+        setAnsweredCount(state.answeredCount);
+        setHasAnswered(state.hasAnswered);
+      }
+      if (state.leaderboard) {
+        setLeaderboard(state.leaderboard);
+      }
+    });
+
     socket.on('question-start', (data) => {
       setCurrentQuestion(data);
       setQuestionNumber(data.questionIndex + 1);
@@ -103,6 +118,7 @@ export default function GameRoom() {
     return () => {
       socket.off('connect');
       socket.off('update-players');
+      socket.off('sync-game-state');
       socket.off('question-start');
       socket.off('player_answered');
       socket.off('leaderboard-update');
@@ -113,16 +129,21 @@ export default function GameRoom() {
 
   // Timer countdown
   useEffect(() => {
-    if (gameState !== 'QUESTION' || timer <= 0) return;
+    if (gameState !== 'QUESTION') return;
+
+    // If timer is already 0 (e.g. upon reload/sync), and we are the host, trigger leaderboard
+    if (timer <= 0) {
+      if (isHost) {
+        socket.emit('request-leaderboard', { quizId: accessCode });
+      }
+      return;
+    }
 
     const interval = setInterval(() => {
       setTimer((prev) => {
         if (prev <= 1) {
           clearInterval(interval);
-          // When timer hits 0 and user is host, auto-show leaderboard
-          if (isHost) {
-            socket.emit('request-leaderboard', { quizId: accessCode });
-          }
+          // request-leaderboard will be handled by the next effect run
           return 0;
         }
         return prev - 1;
@@ -130,7 +151,7 @@ export default function GameRoom() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [gameState, timer > 0 ? 'running' : 'stopped']);
+  }, [gameState, timer <= 0, isHost, accessCode]);
 
   const handleStartGame = () => {
     socket.emit('start-game', { quizId: accessCode });
